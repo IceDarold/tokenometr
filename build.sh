@@ -37,6 +37,10 @@ echo "Built: $APP and $BUILD/Tokenometr.zip"
 if [ "${1:-}" = "--install" ]; then
   INSTALLED="$HOME/Applications/$NAME.app"
   osascript -e 'tell application id "local.tokenometr" to quit' >/dev/null 2>&1 || true
+  for _ in $(seq 1 50); do  # opening the new copy while the old one is still quitting fails
+    pgrep -f "Contents/MacOS/Tokenometr" >/dev/null 2>&1 || break
+    sleep 0.1
+  done
   mkdir -p "$HOME/Applications"
   rm -rf "$INSTALLED"
   ditto "$APP" "$INSTALLED"

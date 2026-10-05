@@ -11,6 +11,11 @@ ZIP_URL="https://github.com/$REPO/releases/latest/download/Tokenometr.zip"
 
 quit_running_copy() {
   osascript -e 'tell application id "local.tokenometr" to quit' >/dev/null 2>&1 || true
+  # Opening the new copy while the old one is still quitting fails, so wait for it to exit.
+  for _ in $(seq 1 50); do
+    pgrep -f "Contents/MacOS/Tokenometr" >/dev/null 2>&1 || return 0
+    sleep 0.1
+  done
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
