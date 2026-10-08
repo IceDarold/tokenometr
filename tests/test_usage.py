@@ -548,11 +548,19 @@ class CommandLineTest(Base):
                               "--cache", self.ws.cache, "--now", "2026-10-07T12:00:00+00:00",
                               "--history", os.path.join(scratch, "history.json"),
                               "--accounts", os.path.join(scratch, "accounts.json"),
-                              "--readings", os.path.join(scratch, "readings.json")],
+                              "--readings", os.path.join(scratch, "readings.json"),
+                              "--chat-sync", os.path.join(scratch, "chat-sync.json")],
                              capture_output=True, text=True, check=True).stdout
         five_hours = json.loads(out)["periods"]["5h"]
         self.assertEqual((five_hours["total"], five_hours["rows"][0]["title"], os.path.exists(self.ws.cache)),
                          (5, "Чат А", True))
+
+    def test_snapshot_carries_the_chat_sync_status(self):
+        state = os.path.join(self.ws.root, "chat-sync.json")
+        with open(state, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "checkedAt": NOW.timestamp() - 30, "chats": 35, "folders": 2}, f)
+        snap = usage.build_snapshot(self.ws.projects, self.ws.sessions, NOW, chat_sync_path=state)
+        self.assertEqual((snap["chatSync"]["state"], snap["chatSync"]["chats"]), ("ok", 35))
 
 
 if __name__ == "__main__":

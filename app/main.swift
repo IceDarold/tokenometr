@@ -3,7 +3,8 @@ import WebKit
 
 /// One window with the usage page. Every 30 seconds (and whenever the app comes to the front)
 /// it runs usage.py and hands the fresh numbers to the page. Every 5 minutes it also takes an
-/// official limit reading through Claude Code CLI (`usage.py --probe`).
+/// official limit reading through Claude Code CLI (`usage.py --probe`). At launch it makes sure the
+/// chat sync between Claude accounts runs in the background (see ChatSync).
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
@@ -43,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let resources = Bundle.main.resourceURL!
         webView.loadFileURL(resources.appendingPathComponent("index.html"), allowingReadAccessTo: resources)
 
+        DispatchQueue.global(qos: .utility).async { ChatSync.install() }
         Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.refresh() }
         Timer.scheduledTimer(withTimeInterval: probeInterval, repeats: true) { [weak self] _ in self?.probe() }
         probe()
@@ -169,6 +171,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 }
 
+/// Keeps the Code-tab chat list the same in every Claude account (chatsync.py). launchd runs it in the
+/// background as this binary with `--chat-sync`, so macOS lists it under Tokenometr's name in Login Items.
+enum ChatSync {
+    static let label = "local.tokenometr.chat-sync"
+    static let flag = "--chat-sync"
+
+    /// /usr/bin/python3 works only with Apple's Command Line Tools or Xcode; otherwise it offers to install them.
+    static var pythonAvailable: Bool {
+        guard let result = run("/usr/bin/xcode-select", ["-p"]), result.status == 0 else { return false }
+        let developerDir = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileManager.default.isExecutableFile(atPath: developerDir + "/usr/bin/python3")
+    }
+
+    /// The LaunchAgent's entry point: turns into `python3 chatsync.py --watch`.
+    static func runAgent() -> Never {
+        guard pythonAvailable else {
+            _ = sleep(3600)  // launchd starts the agent again afterwards; maybe the tools are there by then
+            exit(0)
+        }
+        let script = Bundle.main.resourceURL!.appendingPathComponent("chatsync.py").path
+        let words = ["/usr/bin/python3", script, "--watch"]
+        var arguments: [UnsafeMutablePointer<CChar>?] = words.map { strdup($0) }
+        arguments.append(nil)
+        execv("/usr/bin/python3", &arguments)
+        perror("execv /usr/bin/python3")
+        exit(1)
+    }
+
+    /// Registers the LaunchAgent for this copy of the app, unless it already is.
+    static func install() {
+        guard pythonAvailable, let executable = Bundle.main.executablePath,
+              let resources = Bundle.main.resourceURL else { return }
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        let plist = home.appendingPathComponent("Library/LaunchAgents/\(label).plist")
+        let log = home.appendingPathComponent("Library/Logs/Tokenometr/chat-sync.log")
+        let script = resources.appendingPathComponent("chatsync.py").path
+        let job: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [executable, flag],
+            "RunAtLoad": true,
+            "KeepAlive": ["PathState": [script: true]],  // runs while this copy of the app exists
+            "ProcessType": "Background",
+            "ThrottleInterval": 30,
+            "StandardOutPath": log.path,
+            "StandardErrorPath": log.path,
+            "AssociatedBundleIdentifiers": [Bundle.main.bundleIdentifier ?? "local.tokenometr"],
+        ]
+        let service = "gui/\(getuid())/\(label)"
+        if let current = NSDictionary(contentsOf: plist), current.isEqual(to: job),
+           run("/bin/launchctl", ["print", service])?.status == 0 {
+            return
+        }
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0) else {
+            return
+        }
+        try? fileManager.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard (try? data.write(to: plist, options: .atomic)) != nil else { return }
+        _ = run("/bin/launchctl", ["bootout", service])
+        var waited = 0
+        while waited < 30, run("/bin/launchctl", ["print", service])?.status == 0 {
+            Thread.sleep(forTimeInterval: 0.1)  // bootstrapping again before the old job is gone fails
+            waited += 1
+        }
+        _ = run("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plist.path])
+    }
+
+    private static func run(_ path: String, _ arguments: [String]) -> (status: Int32, output: String)? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+}
+
 final class DataBox: @unchecked Sendable {
     var data = Data()
 }
@@ -179,6 +267,10 @@ extension NSMenu {
         item.submenu = submenu
         addItem(item)
     }
+}
+
+if CommandLine.arguments.dropFirst().first == ChatSync.flag {
+    ChatSync.runAgent()
 }
 
 let app = NSApplication.shared

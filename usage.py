@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import chatsync
+
 PERIODS = ("5h", "today", "week", "all")
 # Effective cost of a token relative to a plain input token: re-reading the cached
 # conversation is cheap, writing it to the cache costs more, Claude's answer costs most.
@@ -398,7 +400,7 @@ def probe(claude, store_path, now):
 
 
 def build_snapshot(projects_dir, sessions_dir, now, cache_path=None, history_path=None, accounts_path=None,
-                   readings_path=None):
+                   readings_path=None, chat_sync_path=None):
     sessions = load_sessions(sessions_dir)
     owner = {}
     for sid, s in sessions.items():
@@ -487,7 +489,8 @@ def build_snapshot(projects_dir, sessions_dir, now, cache_path=None, history_pat
                                  now_ts, week_start, resets_at),
         })
     all_week_start = week_of(current, now)[0]
-    return {"generatedAt": now_ts, "periods": view(None, all_week_start), "accounts": accounts}
+    return {"generatedAt": now_ts, "periods": view(None, all_week_start), "accounts": accounts,
+            "chatSync": chatsync.status(chat_sync_path, now_ts) if chat_sync_path else None}
 
 
 def main():
@@ -502,6 +505,8 @@ def main():
     parser.add_argument("--history", default=os.path.join(support, "Claude", "plan-usage-history.json"))
     parser.add_argument("--accounts", default=os.path.join(support, "Tokenometr", "accounts.json"))
     parser.add_argument("--readings", default=os.path.join(support, "Tokenometr", "readings.json"))
+    parser.add_argument("--chat-sync", default=os.path.join(support, "Tokenometr", "chat-sync.json"),
+                        help="status file of the chat sync between accounts (chatsync.py)")
     parser.add_argument("--now", help="ISO time to count from (default: now)")
     parser.add_argument("--probe", action="store_true",
                         help="take a limit reading with Claude Code CLI, keep it in --readings and print it")
@@ -511,7 +516,7 @@ def main():
         print(json.dumps(probe(find_claude(), args.readings, now), ensure_ascii=False))
         return
     snapshot = build_snapshot(args.projects, args.sessions, now, args.cache, args.history, args.accounts,
-                              args.readings)
+                              args.readings, args.chat_sync)
     print(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")))
 
 

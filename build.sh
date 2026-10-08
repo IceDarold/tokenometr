@@ -29,7 +29,7 @@ done
 iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
 cp app/Info.plist "$APP/Contents/Info.plist"
-cp web/index.html usage.py "$APP/Contents/Resources/"
+cp web/index.html usage.py chatsync.py "$APP/Contents/Resources/"
 codesign --force --sign - "$APP"
 ditto -c -k --keepParent "$APP" "$BUILD/Tokenometr.zip"
 echo "Built: $APP and $BUILD/Tokenometr.zip"

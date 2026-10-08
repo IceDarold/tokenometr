@@ -20,9 +20,13 @@ quit_running_copy() {
 
 if [ "${1:-}" = "--uninstall" ]; then
   quit_running_copy
-  rm -rf "$APP" "$HOME/Library/Caches/Tokenometr"
-  echo "Токенометр удалён."
-  echo "Настройки и сохранённые замеры остались в ~/Library/Application Support/Tokenometr."
+  # The background chat sync between Claude accounts goes too.
+  launchctl bootout "gui/$(id -u)/local.tokenometr.chat-sync" >/dev/null 2>&1 || true
+  rm -f "$HOME/Library/LaunchAgents/local.tokenometr.chat-sync.plist"
+  rm -rf "$APP" "$HOME/Library/Caches/Tokenometr" "$HOME/Library/Logs/Tokenometr"
+  echo "Токенометр удалён вместе с переносом чатов между аккаунтами."
+  echo "Чаты, которые уже перенесены, остаются в списках аккаунтов."
+  echo "Настройки, замеры и резервные копии списков чатов остались в ~/Library/Application Support/Tokenometr."
   echo "Их можно удалить так: rm -rf ~/Library/Application\\ Support/Tokenometr"
   exit 0
 fi

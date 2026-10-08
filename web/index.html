@@ -66,6 +66,8 @@
   .bank-note { margin: 8px 0 0; font-size: 14px; }
   .bank-reading { margin: 2px 0 0; color: var(--pencil); font-size: 13px; }
   .bank-source { margin: 16px 0 30px; color: var(--pencil); font-size: 13px; max-width: 76ch; }
+  .sync { margin: 18px 0 0; color: var(--pencil); font-size: 13px; max-width: 76ch; }
+  .sync.attention { color: var(--ink); border-left: 3px solid var(--tenths); padding: 2px 0 2px 12px; }
   .accounts { display: flex; flex-wrap: wrap; gap: 18px; }
   .accounts .period { font-size: 14px; }
 
@@ -151,6 +153,7 @@
     </div>
   </div>
   <section class="banks" id="banks" aria-label="Недельный лимит по аккаунтам"></section>
+  <p class="sync" id="sync" role="status" hidden></p>
   <p class="bank-source" id="bankSource" hidden>
     Это оценки: к последнему проценту, который показывал Claude, досчитан расход по перепискам на этом Mac.
     «Мимо этого Mac» значит, что расхода нет в переписках на этом компьютере: это облачные задачи, обычные
@@ -259,6 +262,25 @@
     if (date.toDateString() === today.toDateString()) day = "сегодня";
     else if (date.toDateString() === yesterday.toDateString()) day = "вчера";
     return day + " в " + TIME.format(date);
+  }
+
+  // What the chat sync between accounts (chatsync.py, run in the background) is up to.
+  const SYNC_TEXT = {
+    ok: s => "Чаты вкладки Code общие для всех аккаунтов: " + s.chats + " " + plural(s.chats, "чат", "чата", "чатов") + ".",
+    restart: s => "В аккаунт, открытый в Claude, перенесено чатов: " + s.pending
+      + ". Они появятся в списке после перезапуска Claude.",
+    off: () => "Перенос чатов между аккаунтами выключен.",
+    stale: s => "Перенос чатов между аккаунтами последний раз работал " + moment(s.checkedAt)
+      + ". Проверь, что Токенометру разрешено работать в фоне: Системные настройки → Основные → Объекты входа.",
+    error: s => "Перенос чатов между аккаунтами сейчас не работает: " + s.error,
+  };
+
+  function drawSync(sync) {
+    const box = $("sync");
+    box.hidden = !sync || !(sync.state in SYNC_TEXT);
+    if (box.hidden) return;
+    box.classList.toggle("attention", sync.state === "restart" || sync.state === "stale" || sync.state === "error");
+    box.textContent = SYNC_TEXT[sync.state](sync);
   }
 
   const bankViews = new Map();  // account id -> the elements of its bank, updated in place so gauges animate
@@ -467,6 +489,7 @@
     if (!state.snap) return;
     const accounts = state.snap.accounts || [];
     drawBanks(accounts);
+    drawSync(state.snap.chatSync);
     drawAccountTabs(accounts);
 
     const account = accounts.find(a => a.id === state.account);
