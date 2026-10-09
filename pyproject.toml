@@ -1,0 +1,15 @@
+# Only so the team site can install the limit math as a package: `tokenometr_limits.py` is
+# the same file the Mac app runs. The app itself is not a Python package, see build.sh.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tokenometr-limits"
+version = "1.2.0"
+description = "The limit math of Tokenometr: what a token weighs, when a week of a limit begins and what is left of it"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+
+[tool.setuptools]
+py-modules = ["tokenometr_limits"]
