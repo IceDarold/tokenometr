@@ -109,11 +109,17 @@ def load_cache(path):
 
 
 def write_json(path, data):
+    """Writes the file whole or not at all. Each writer has a temporary file of its own: the window and the
+    background sync of teams may write the same file at the same time, and the last one wins."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, path)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def save_cache(path, files):
@@ -266,17 +272,43 @@ def run_claude(claude, args, cwd):
     return done.stdout if done.returncode == 0 else None
 
 
+LABELS_FILE = "account-labels.json"
+
+
+def load_labels(path):
+    """{account id: what the person knows the account by}, as `probe` has seen it."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            labels = json.load(f).get("labels", {})
+        return {org: label for org, label in labels.items() if isinstance(label, str)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def remember_label(path, org, label):
+    """Keep that `org` is known as `label` (the email Claude Code is signed in with)."""
+    if not (org and label):
+        return
+    labels = load_labels(path)
+    if labels.get(org) != label:
+        labels[org] = label
+        write_json(path, {"version": 1, "labels": labels})
+
+
 def probe(claude, store_path, now):
     """Ask Claude Code CLI for the limits of the account it is signed in to, and keep that as a reading."""
     if not claude:
         return None
     # An empty folder of its own: the CLI files its runs by folder, and finds no project settings here.
-    cwd = os.path.join(os.path.dirname(os.path.abspath(store_path)), "cli")
+    home = os.path.dirname(os.path.abspath(store_path))
+    cwd = os.path.join(home, "cli")
     os.makedirs(cwd, exist_ok=True)
     try:
-        org = json.loads(run_claude(claude, ["auth", "status", "--json"], cwd) or "").get("orgId")
+        status = json.loads(run_claude(claude, ["auth", "status", "--json"], cwd) or "")
+        org = status.get("orgId")
     except (ValueError, AttributeError):
-        org = None
+        status, org = {}, None
+    remember_label(os.path.join(home, LABELS_FILE), org, status.get("email") or status.get("orgName"))
     parsed = parse_usage_text(run_claude(claude, USAGE_COMMAND, cwd), now) if org else None
     if not parsed:
         return None
@@ -288,8 +320,12 @@ def probe(claude, store_path, now):
     return reading
 
 
-def build_snapshot(projects_dir, sessions_dir, now, cache_path=None, history_path=None, accounts_path=None,
-                   readings_path=None, chat_sync_path=None):
+def collect(projects_dir, sessions_dir, cache_path=None, history_path=None, readings_path=None):
+    """What the transcripts and Claude's readings say, before anything is counted over a period.
+
+    Returns (sessions, calls_by_row, readings): the chats by id, the calls of every chat by message id as
+    (call, is subagent, transcript path, account the call was made on), and all the limit readings.
+    """
     sessions = load_sessions(sessions_dir)
     owner = {}
     for sid, s in sessions.items():
@@ -321,7 +357,95 @@ def build_snapshot(projects_dir, sessions_dir, now, cache_path=None, history_pat
                 seen[c[0]] = (c, is_sub, path, account_at(c[1]))
     if cache is not None:
         save_cache(cache_path, {p: e for p, e in cache.items() if p in scanned})
+    return sessions, calls_by_row, readings
 
+
+TEAM_STALE_SECONDS = 15 * 60  # team numbers older than this are shown with the time they are from
+
+
+def load_team(path):
+    """What teamsync.py last learned: the connection to the site and the numbers of the user's teams."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            team = json.load(f)
+        return team if isinstance(team, dict) and team.get("version") == 1 else None
+    except (OSError, ValueError):
+        return None
+
+
+def team_rows(chats, members, timestamp):
+    """The chats of a team's period in the shape of the window's rows, each with whose it is."""
+    names = {m.get("id"): m for m in members}
+    rows = []
+    for chat in chats:
+        member = names.get(chat.get("member"), {})
+        rows.append({
+            "id": f"{chat.get('member')}/{chat.get('key')}", "title": chat.get("title") or "Без названия",
+            "folder": chat.get("folder") or "", "main": chat.get("main") or 0, "sub": chat.get("sub") or 0,
+            "subagents": chat.get("subagents") or 0, "calls": 0, "last": chat.get("last") or timestamp,
+            "active": bool(chat.get("active")), "archived": bool(chat.get("archived")),
+            "other": chat.get("key") == OTHER, "member": chat.get("member"),
+            "memberName": member.get("name") or "", "you": bool(member.get("you"))})
+    return rows
+
+
+def apply_team(accounts, team, now_ts):
+    """Puts the team's numbers on the accounts the team counts, and returns the state of the connection.
+
+    An account the team counts shows the team's bank and the chats of every member, the same for everyone;
+    the others stay as this Mac counted them.
+    """
+    if not team or not team.get("connected"):
+        return None
+    status = {"connected": True, "state": team.get("state") or "ok", "message": team.get("message"),
+              "syncedAt": team.get("syncedAt"), "site": team.get("site"),
+              "teams": [{"id": s["team"]["id"], "name": s["team"]["name"]}
+                        for s in team.get("teams") or [] if isinstance(s.get("team"), dict)],
+              "machine": team.get("machine"), "stale": False}
+    fetched = team.get("fetchedAt")
+    status["dataAt"] = fetched
+    status["stale"] = bool(fetched) and now_ts - fetched > TEAM_STALE_SECONDS
+    by_org = {}
+    for summary in team.get("teams") or []:
+        for shared in summary.get("accounts") or []:
+            by_org.setdefault(shared.get("org"), (summary, shared))
+    for account in accounts:
+        found = by_org.get(account.get("id"))
+        if not found:
+            continue
+        summary, shared = found
+        members = summary.get("members") or []
+        bank = shared.get("bank")
+        periods = {}
+        for key, period in (shared.get("periods") or {}).items():
+            rows = team_rows(period.get("chats") or [], members, now_ts)
+            periods[key] = {"since": period.get("since"), "total": period.get("total") or 0, "rows": rows,
+                            "hidden": period.get("hidden") or 0,
+                            "byMember": [{"member": m.get("member"), "total": (m.get("main") or 0) + (m.get("sub") or 0)}
+                                         for m in period.get("byMember") or []]}
+        account["periods"] = {**account["periods"], **periods}
+        account["name"] = shared.get("name") or account["name"]
+        if bank:
+            account["bank"] = {"total": bank["total"], "remaining": bank["remaining"],
+                               "usedPercent": bank["usedPercent"], "perPercent": bank["perPercent"],
+                               "readingAt": bank.get("readingAt"), "readingPercent": bank.get("readingPercent"),
+                               "offMacPercent": bank.get("outsidePercent"),
+                               "offMacTokens": bank.get("outsideTokens"), "resetsAt": bank["resetsAt"]}
+        account["team"] = {
+            "teamId": summary["team"]["id"], "teamName": summary["team"]["name"],
+            "members": members,
+            "parts": [{"member": part["member"], "percent": part["percent"],
+                       "name": next((m.get("name") for m in members if m.get("id") == part["member"]), ""),
+                       "you": any(m.get("id") == part["member"] and m.get("you") for m in members)}
+                      for part in (bank or {}).get("byMember") or []],
+        }
+    return status
+
+
+def build_snapshot(projects_dir, sessions_dir, now, cache_path=None, history_path=None, accounts_path=None,
+                   readings_path=None, chat_sync_path=None, team_path=None):
+    sessions, calls_by_row, readings = collect(projects_dir, sessions_dir, cache_path, history_path, readings_path)
+    app_readings = [r for r in readings if r.get("source") != "cli"]
     now_ts = now.timestamp()
 
     def view(account, week_start):
@@ -373,8 +497,9 @@ def build_snapshot(projects_dir, sessions_dir, now, cache_path=None, history_pat
                                  now_ts, week_start, resets_at),
         })
     all_week_start = week_of(current, now)[0]
+    team = apply_team(accounts, load_team(team_path) if team_path else None, now_ts)
     return {"generatedAt": now_ts, "periods": view(None, all_week_start), "accounts": accounts,
-            "chatSync": chatsync.status(chat_sync_path, now_ts) if chat_sync_path else None}
+            "chatSync": chatsync.status(chat_sync_path, now_ts) if chat_sync_path else None, "team": team}
 
 
 def main():
@@ -391,6 +516,8 @@ def main():
     parser.add_argument("--readings", default=os.path.join(support, "Tokenometr", "readings.json"))
     parser.add_argument("--chat-sync", default=os.path.join(support, "Tokenometr", "chat-sync.json"),
                         help="status file of the chat sync between accounts (chatsync.py)")
+    parser.add_argument("--team", default=os.path.join(support, "Tokenometr", "team.json"),
+                        help="the team's numbers and the state of the connection (teamsync.py)")
     parser.add_argument("--now", help="ISO time to count from (default: now)")
     parser.add_argument("--probe", action="store_true",
                         help="take a limit reading with Claude Code CLI, keep it in --readings and print it")
@@ -400,7 +527,7 @@ def main():
         print(json.dumps(probe(find_claude(), args.readings, now), ensure_ascii=False))
         return
     snapshot = build_snapshot(args.projects, args.sessions, now, args.cache, args.history, args.accounts,
-                              args.readings, args.chat_sync)
+                              args.readings, args.chat_sync, args.team)
     print(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")))
 
 

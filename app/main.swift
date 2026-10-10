@@ -4,13 +4,19 @@ import WebKit
 /// One window with the usage page. Every 30 seconds (and whenever the app comes to the front)
 /// it runs usage.py and hands the fresh numbers to the page. Every 5 minutes it also takes an
 /// official limit reading through Claude Code CLI (`usage.py --probe`). At launch it makes sure the
-/// chat sync between Claude accounts runs in the background (see ChatSync).
+/// chat sync between Claude accounts runs in the background (see ChatSync); the same background run
+/// sends the usage of a team's accounts to the site (teamsync.py). The page's "Команда" panel
+/// connects the Mac to a team, and the page asks this class to do what a page cannot: run
+/// teamsync.py and open the site.
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var pageReady = false
     private var running = false
     private var probing = false
+    private var teamSyncing = false
+    /// The running `teamsync.py connect`, which waits for a person to confirm a code on the site.
+    private var connecting: Process?
     private var lastRun = Date.distantPast
     private let interval: TimeInterval = 30
     private let probeInterval: TimeInterval = 300
@@ -22,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "refresh")
+        config.userContentController.add(self, name: "team")
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")  // no white flash before the page paints
@@ -64,7 +71,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        refresh()
+        if message.name == "team", let body = message.body as? [String: Any], let action = body["action"] as? String {
+            handleTeam(action, url: body["url"] as? String)
+        } else {
+            syncTeam()  // the Refresh button also asks the site for the team's numbers
+        }
+    }
+
+    /// What the page's team panel asks for.
+    private func handleTeam(_ action: String, url: String?) {
+        switch action {
+        case "connect":
+            connectTeam()
+        case "cancel":
+            connecting?.terminate()
+            connecting = nil
+        case "disconnect":
+            worker.async {
+                _ = Self.runScript("teamsync.py", ["disconnect"])
+                DispatchQueue.main.async { self.refresh() }
+            }
+        case "open":
+            // Only the site's own pages open, never a link the page was handed from elsewhere.
+            if let url = url, let target = URL(string: url), target.scheme == "https" || target.host == "127.0.0.1" {
+                NSWorkspace.shared.open(target)
+            }
+        default:
+            break
+        }
+    }
+
+    /// Sends the team's usage now and shows what the site answers.
+    private func syncTeam() {
+        guard !teamSyncing else { refresh(); return }
+        teamSyncing = true
+        worker.async {
+            _ = Self.runScript("teamsync.py", ["sync"])
+            DispatchQueue.main.async {
+                self.teamSyncing = false
+                self.refresh()
+            }
+        }
+    }
+
+    /// Runs `teamsync.py connect` and hands each line it prints to the page: the code to confirm, then the result.
+    private func connectTeam() {
+        connecting?.terminate()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [Bundle.main.resourceURL!.appendingPathComponent("teamsync.py").path, "connect"]
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            webView.evaluateJavaScript(
+                "window.teamEvent({state: 'error', message: \(Self.jsString("python3 не запустился"))})",
+                completionHandler: nil)
+            return
+        }
+        connecting = process
+        DispatchQueue.global(qos: .userInitiated).async {
+            var buffer = Data()
+            let handle = out.fileHandleForReading
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                buffer.append(chunk)
+                while let newline = buffer.firstIndex(of: 0x0A) {
+                    let line = buffer.subdata(in: buffer.startIndex..<newline)
+                    buffer.removeSubrange(buffer.startIndex...newline)
+                    guard let text = String(data: line, encoding: .utf8), !text.isEmpty else { continue }
+                    // The line is JSON from our own script; it goes to the page as a string and is parsed there.
+                    let js = "window.teamEvent(JSON.parse(\(Self.jsString(text))))"
+                    DispatchQueue.main.async { self.webView.evaluateJavaScript(js, completionHandler: nil) }
+                }
+            }
+            process.waitUntilExit()
+            DispatchQueue.main.async {
+                if self.connecting === process { self.connecting = nil }
+                self.refresh()
+            }
+        }
     }
 
     @objc private func refreshNow() { refresh() }
@@ -87,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         guard !probing else { return }
         probing = true
         worker.async {
-            _ = Self.runScript(["--probe"])
+            _ = Self.runScript("usage.py", ["--probe"])
             DispatchQueue.main.async {
                 self.probing = false
                 self.refresh()
@@ -97,7 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     /// Runs usage.py and returns the JavaScript call that shows its result (or its error) on the page.
     private static func runCounter() -> String {
-        guard let result = runScript([]) else {
+        guard let result = runScript("usage.py", []) else {
             return "window.renderError(\(jsString("python3 не запустился")))"
         }
         if result.status == 0, let json = String(data: result.output, encoding: .utf8), !json.isEmpty {
@@ -108,9 +197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return "window.renderError(\(jsString(message)))"
     }
 
-    /// Runs usage.py with `arguments`; nil if it could not be started.
-    private static func runScript(_ arguments: [String]) -> (status: Int32, output: Data, errors: Data)? {
-        let script = Bundle.main.resourceURL!.appendingPathComponent("usage.py").path
+    /// Runs one of the scripts of the app with `arguments`; nil if it could not be started.
+    private static func runScript(_ name: String, _ arguments: [String]) -> (status: Int32, output: Data, errors: Data)? {
+        let script = Bundle.main.resourceURL!.appendingPathComponent(name).path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [script] + arguments

@@ -10,7 +10,10 @@ BUILD="build"
 APP="$BUILD/$NAME.app"
 MIN_MACOS="13.0"
 
-python3 -m unittest discover -s tests   # never ship a broken counter
+# Never ship a broken counter. SKIP_TESTS=1 skips this run when the tests have just run somewhere else.
+if [ -z "${SKIP_TESTS:-}" ]; then
+  python3 -m unittest discover -s tests
+fi
 
 rm -rf "$BUILD"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$BUILD/AppIcon.iconset"
@@ -29,7 +32,7 @@ done
 iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
 cp app/Info.plist "$APP/Contents/Info.plist"
-cp web/index.html usage.py chatsync.py tokenometr_limits.py "$APP/Contents/Resources/"
+cp web/index.html usage.py chatsync.py teamsync.py tokenometr_limits.py "$APP/Contents/Resources/"
 codesign --force --sign - "$APP"
 ditto -c -k --keepParent "$APP" "$BUILD/Tokenometr.zip"
 echo "Built: $APP and $BUILD/Tokenometr.zip"

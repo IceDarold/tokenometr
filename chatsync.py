@@ -11,7 +11,9 @@ removed: such changes wait until Claude quits. New cards can still be added ther
 a restart. Every card that is overwritten or removed is kept in the backup folder first.
 
   chatsync.py           one pass
-  chatsync.py --watch   a pass whenever the folders change (what the LaunchAgent runs)
+  chatsync.py --watch   a pass whenever the folders change (what the LaunchAgent runs); it also sends the
+                        usage of the team's accounts to the site every few minutes, if this Mac is
+                        connected to a team (teamsync.py)
 """
 import argparse
 import fcntl
@@ -22,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -39,6 +42,7 @@ POLL_SECONDS = 2
 FULL_PASS_SECONDS = 60  # a pass even without changes, so the status shows the sync is alive
 RETRY_SECONDS = 10  # how often to look whether Claude has quit while changes wait for that
 STALE_SECONDS = 300  # a status older than this means the sync is not running
+TEAM_SYNC_SECONDS = 300  # how often the usage goes to the team's site
 BACKUP_DAYS = 14
 TOMBSTONE_DAYS = 90
 EMPTIED_GUARD = 3  # a list that loses all of at least this many chats at once was not emptied by hand
@@ -511,12 +515,43 @@ def locked_pass(paths, cache):
         return sync(paths, cache=cache)
 
 
+def team_pass(paths, report, sync=None):
+    """Sends the usage of the team's accounts, if this Mac is connected to a team. Never raises.
+
+    It runs beside the chat sync, in its own thread: a slow site must not hold the chat lists back.
+    `report` gets the problem of the pass, or None when it went well.
+    """
+    try:
+        import teamsync
+        support = os.path.dirname(os.path.abspath(paths.state))
+        claude = os.path.dirname(paths.sessions)
+        home = os.path.expanduser("~")
+        view = (sync or teamsync.sync)(teamsync.Paths(
+            support, os.path.join(home, ".claude", "projects"), paths.sessions,
+            os.path.join(claude, "plan-usage-history.json"),
+            os.path.join(home, "Library", "Caches", "Tokenometr", "scan-cache.json")))
+        report(view.get("message") if view.get("state") in ("error", "update", "revoked") else None)
+    except Exception as e:  # the chat sync goes on whatever happens to the team's
+        report(f"{type(e).__name__}: {e}")
+
+
 def watch(paths):
     script = os.path.abspath(__file__)
     script_stamp = file_stamp(script)
     cache, last_signature, last_pass, waiting, last_error = {}, None, 0.0, False, None
+    last_team, team_thread, team_error = 0.0, None, [None]
+
+    def team_reported(problem):
+        if problem != team_error[0]:  # a lasting problem is logged once, not at every try
+            log(f"team sync: {problem}" if problem else "team sync is fine")
+        team_error[0] = problem
+
     log("watching Claude's chat lists")
     while True:
+        if time.time() - last_team >= TEAM_SYNC_SECONDS and not (team_thread and team_thread.is_alive()):
+            last_team = time.time()
+            team_thread = threading.Thread(target=team_pass, args=(paths, team_reported), daemon=True)
+            team_thread.start()
         stamp = file_stamp(script)
         if stamp != script_stamp:
             if stamp is None:

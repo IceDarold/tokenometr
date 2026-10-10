@@ -20,11 +20,13 @@ quit_running_copy() {
 
 if [ "${1:-}" = "--uninstall" ]; then
   quit_running_copy
-  # The background chat sync between Claude accounts goes too.
+  # The background chat sync between Claude accounts, and with it the sending of a team's usage, goes too.
   launchctl bootout "gui/$(id -u)/local.tokenometr.chat-sync" >/dev/null 2>&1 || true
   rm -f "$HOME/Library/LaunchAgents/local.tokenometr.chat-sync.plist"
   rm -rf "$APP" "$HOME/Library/Caches/Tokenometr" "$HOME/Library/Logs/Tokenometr"
-  echo "Токенометр удалён вместе с переносом чатов между аккаунтами."
+  # The token of the connection to a team goes from the keychain too.
+  security delete-generic-password -s local.tokenometr.team >/dev/null 2>&1 || true
+  echo "Токенометр удалён вместе с переносом чатов между аккаунтами и подключением к команде."
   echo "Чаты, которые уже перенесены, остаются в списках аккаунтов."
   echo "Настройки, замеры и резервные копии списков чатов остались в ~/Library/Application Support/Tokenometr."
   echo "Их можно удалить так: rm -rf ~/Library/Application\\ Support/Tokenometr"

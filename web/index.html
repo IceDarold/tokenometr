@@ -133,6 +133,26 @@
   .problem pre { margin: 8px 0 0; white-space: pre-wrap; font-size: 12px; color: var(--pencil); max-height: 9em; overflow: auto; }
   .note { margin: 34px 0 0; max-width: 62ch; color: var(--pencil); font-size: 13px; }
 
+  .refresh.attention { border-color: var(--tenths); }
+  .team-panel { margin: 14px 0 0; padding: 14px 18px 16px; max-width: 76ch; border-left: 3px solid var(--ink);
+                border-radius: 0 6px 6px 0; background: var(--plate); }
+  .team-panel p { margin: 0 0 8px; }
+  .team-panel .team-title { font-weight: 700; }
+  .team-panel .code { margin: 6px 0 10px; font: 700 36px/1.1 "DIN Alternate", "PT Sans", sans-serif;
+                      letter-spacing: 0.1em; font-variant-numeric: tabular-nums; }
+  .team-note { color: var(--pencil); font-size: 13px; }
+  .team-note.attention { color: var(--ink); border-left: 3px solid var(--tenths); padding-left: 12px; }
+  .team-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .team-actions button {
+    border: 1px solid var(--pencil); background: none; border-radius: 6px; padding: 4px 12px;
+    font-size: 14px; cursor: pointer; color: var(--ink);
+  }
+  .team-actions button:hover { background: var(--enamel); }
+  .team-actions button.main { background: var(--ink); border-color: var(--ink); color: var(--enamel); }
+  .team-actions button.main:hover { opacity: 0.88; background: var(--ink); }
+  .persons { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 6px 0 0; }
+  .bank-parts { margin: 2px 0 0; font-size: 13px; }
+
   @media (max-width: 560px) {
     .sheet { padding: 16px 16px 32px; }
     .periods { gap: 16px; }
@@ -149,9 +169,11 @@
     <p class="bank-title" id="bankTitle" hidden>Недельный лимит</p>
     <div class="status">
       <span id="updated">считаю…</span>
+      <button class="refresh" id="team" aria-expanded="false" aria-controls="teamPanel">Команда</button>
       <button class="refresh" id="refresh">Обновить</button>
     </div>
   </div>
+  <section class="team-panel" id="teamPanel" aria-label="Команда" hidden></section>
   <section class="banks" id="banks" aria-label="Недельный лимит по аккаунтам"></section>
   <p class="sync" id="sync" role="status" hidden></p>
   <p class="bank-source" id="bankSource" hidden>
@@ -169,6 +191,8 @@
     </div>
     <div class="accounts" id="accountTabs" role="tablist" aria-label="Аккаунт" hidden></div>
   </div>
+
+  <div class="persons" id="persons" role="tablist" aria-label="Чьи чаты" hidden></div>
 
   <section class="meter">
     <div class="drums" id="drums" role="img" aria-label="Показания счётчика"></div>
@@ -214,7 +238,7 @@
   const PERCENT = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 0 });
 
   const state = { snap: null, error: null, period: savedPeriod(), account: savedChoice("account") || "all",
-                  updatedAt: 0, refreshing: false };
+                  updatedAt: 0, refreshing: false, person: "all", panel: false, flow: null, sure: false };
   const $ = id => document.getElementById(id);
 
   function savedPeriod() {
@@ -291,11 +315,11 @@
       root.innerHTML = '<p class="bank-name"></p>'
         + '<p class="bank-left"><span class="bank-num"></span><span class="bank-of"></span></p>'
         + '<div class="gauge" role="img"><span class="gauge-fill"></span></div>'
-        + '<p class="bank-note"></p><p class="bank-reading"></p>';
+        + '<p class="bank-note"></p><p class="bank-reading"></p><p class="bank-parts"></p>';
       const part = selector => root.querySelector(selector);
       bankViews.set(id, { root, name: part(".bank-name"), left: part(".bank-left"), num: part(".bank-num"),
         of: part(".bank-of"), gauge: part(".gauge"), fill: part(".gauge-fill"), note: part(".bank-note"),
-        reading: part(".bank-reading") });
+        reading: part(".bank-reading"), parts: part(".bank-parts") });
     }
     return bankViews.get(id);
   }
@@ -314,8 +338,15 @@
         here.textContent = "сейчас в Claude";
         view.name.appendChild(here);
       }
+      if (account.team) {
+        const shared = document.createElement("span");
+        shared.className = "here";
+        shared.textContent = "команда «" + account.team.teamName + "»";
+        view.name.appendChild(shared);
+      }
       const bank = account.bank;
       view.left.hidden = view.gauge.hidden = view.note.hidden = !bank;
+      view.parts.hidden = true;
       if (!bank) {
         view.reading.textContent = "Пока мало замеров Claude, чтобы оценить лимит.";
         continue;
@@ -335,9 +366,20 @@
         ? "Claude " + moment(bank.readingAt) + " показывал " + PERCENT.format(bank.readingPercent / 100)
         : "На этой неделе Claude ещё не показывал процент";
       if (bank.readingPercent > 0 && bank.offMacPercent != null) {
-        reading += ", из них ≈" + PERCENT.format(bank.offMacPercent / 100) + " ушло мимо этого Mac";
+        reading += ", из них ≈" + PERCENT.format(bank.offMacPercent / 100) + " ушло мимо "
+          + (account.team ? "команды" : "этого Mac");
       }
       view.reading.textContent = reading + ".";
+      if (account.team) {
+        const parts = account.team.parts.slice().sort((a, b) => b.percent - a.percent)
+          .map(part => (part.you ? "ты" : part.name || "участник") + " " + PERCENT.format(part.percent / 100));
+        if (bank.offMacPercent != null) parts.push("мимо команды ≈" + PERCENT.format(bank.offMacPercent / 100));
+        let text = parts.length ? "Из лимита недели: " + parts.join(", ") + "." : "";
+        const team = state.snap.team;
+        if (team && team.stale && team.dataAt) text += " Данные команды на " + TIME.format(team.dataAt * 1000) + ".";
+        view.parts.textContent = text;
+        view.parts.hidden = !text;
+      }
     }
   }
 
@@ -400,6 +442,113 @@
     $("drums").setAttribute("aria-label", millions(total) + " млн взвешенных токенов");
   }
 
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function postTeam(message) {
+    try { window.webkit.messageHandlers.team.postMessage(message); } catch (e) {}
+  }
+
+  function teamButton(label, onClick, main) {
+    const button = el("button", main ? "main" : "", label);
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function siteUrl(path) {
+    const site = state.snap && state.snap.team && state.snap.team.site;
+    return (site || "https://tokenometr.archik.tech") + path;
+  }
+
+  function drawTeam() {
+    const team = state.snap ? state.snap.team : null;
+    const flow = state.flow;
+    const button = $("team");
+    const trouble = team && team.state !== "ok";
+    button.textContent = team && team.teams.length ? "Команда: " + team.teams[0].name : "Команда";
+    button.classList.toggle("attention", !!trouble || !!(flow && flow.state === "waiting"));
+    button.setAttribute("aria-expanded", state.panel);
+    const panel = $("teamPanel");
+    panel.hidden = !state.panel;
+    if (!state.panel) return;
+    panel.textContent = "";
+    const actions = el("div", "team-actions");
+
+    if (flow && flow.state === "waiting") {
+      panel.append(el("p", "team-title", "Подтвердите код на сайте"),
+                   el("div", "code", flow.code),
+                   el("p", "team-note", "Сайт открылся в браузере: войдите и нажмите «Подключить». Сверьте код. Он действует 10 минут."));
+      actions.append(teamButton("Открыть сайт ещё раз", () => postTeam({ action: "open", url: flow.url })),
+                     teamButton("Отмена", () => { state.flow = null; postTeam({ action: "cancel" }); draw(); }));
+    } else if (flow && flow.state === "starting") {
+      panel.append(el("p", "", "Прошу код у сайта…"));
+    } else if (!team || (team.state === "revoked")) {
+      if (team && team.state === "revoked") {
+        panel.append(el("p", "team-note attention", "Mac отключён от команды: сайт больше не принимает его токен. Подключите его снова."));
+      }
+      if (flow && (flow.state === "expired" || flow.state === "error")) {
+        panel.append(el("p", "team-note attention", flow.state === "expired"
+          ? "Код не подтвердили вовремя. Попробуйте ещё раз."
+          : "Не получилось подключиться: " + (flow.message || "неизвестная ошибка")));
+      }
+      panel.append(el("p", "team-title", "Работаете вместе с одного аккаунта Claude?"),
+                   el("p", "", "Подключите Mac к команде: каждый увидит, кто сколько потратил и на какие чаты, а остаток лимита общего аккаунта у всех будет одинаковый. С этого Mac уйдут только названия чатов, числа токенов и замеры лимита по общим аккаунтам: текст переписок и личные аккаунты не уходят."));
+      actions.append(teamButton("Подключить к команде", () => { state.flow = { state: "starting" }; postTeam({ action: "connect" }); draw(); }, true),
+                     teamButton("Что уходит с Mac", () => postTeam({ action: "open", url: siteUrl("/privacy") })));
+    } else {
+      const user = team.user && (team.user.email || team.user.name);
+      panel.append(el("p", "team-title", team.teams.length ? "Команда «" + team.teams.map(t => t.name).join("», «") + "»"
+                                                          : "Mac подключён"),
+                   el("p", "", "Подключено" + (user ? " как " + user : "") + ". Расход общих аккаунтов уходит на сайт раз в пять минут."));
+      if (!team.teams.length) {
+        panel.append(el("p", "team-note", "Вы пока не в команде: создайте её на сайте и позовите людей ссылкой."));
+      } else if (!state.snap.accounts.some(a => a.team)) {
+        panel.append(el("p", "team-note", "У команды пока нет общих аккаунтов Claude: отметьте нужный на сайте, в разделе «Аккаунты Claude»."));
+      }
+      if (team.state === "update") {
+        panel.append(el("p", "team-note attention", "Обновите Токенометр: сайт говорит с новой версией. Скачайте её на сайте tokenometr.archik.tech."));
+      } else if (team.state === "error") {
+        panel.append(el("p", "team-note attention", (team.message || "Сайт не ответил") + ". Показаны последние данные, приложение повторит попытку само."));
+      } else if (team.syncedAt) {
+        panel.append(el("p", "team-note", "Данные отправлены " + ago(team.syncedAt) + "."));
+      }
+      actions.append(teamButton("Открыть на сайте", () => postTeam({ action: "open", url: siteUrl("/app/overview") }), true),
+                     teamButton(state.sure ? "Точно отключить?" : "Отключить", () => {
+                       if (!state.sure) { state.sure = true; draw(); setTimeout(() => { state.sure = false; draw(); }, 4000); return; }
+                       state.sure = false;
+                       postTeam({ action: "disconnect" });
+                     }));
+      panel.append(el("p", "team-note", "Отключение стирает токен на этом Mac. Отозвать его на сайте можно в «Настройки → Устройства»."));
+    }
+    panel.append(actions);
+  }
+
+  // The tabs "Все · Ты · Вася" over the chats of an account the team counts; returns who is chosen.
+  function drawPersons(account) {
+    const tabs = $("persons");
+    const members = account && account.team ? account.team.members : [];
+    tabs.hidden = members.length < 2;
+    if (tabs.hidden) return "all";
+    if (state.person !== "all" && !members.some(m => m.id === state.person)) state.person = "all";
+    const ordered = [{ id: "all", name: "Все" }].concat(
+      members.filter(m => m.you).map(m => ({ id: m.id, name: "Ты" })),
+      members.filter(m => !m.you).map(m => ({ id: m.id, name: m.name })));
+    tabs.textContent = "";
+    for (const member of ordered) {
+      const tab = el("button", "period", member.name);
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", member.id === state.person);
+      tab.tabIndex = member.id === state.person ? 0 : -1;
+      tab.addEventListener("click", () => { state.person = member.id; draw(); });
+      tabs.appendChild(tab);
+    }
+    return state.person;
+  }
+
   function drawStatus() {
     let text = "считаю…";
     if (state.refreshing) text = "обновляю…";
@@ -423,7 +572,7 @@
     box.appendChild(p);
   }
 
-  function row(r, total, max) {
+  function row(r, total, max, named) {
     const li = document.createElement("li");
     li.className = "chat" + (r.other ? " other" : "");
 
@@ -464,6 +613,7 @@
     const meta = document.createElement("p");
     meta.className = "meta";
     const parts = [];
+    if (named && r.memberName) parts.push(r.you ? "ты" : r.memberName);
     if (r.other) parts.push("сессии из терминала и удалённые чаты");
     if (r.folder) parts.push(r.folder);
     if (r.subagents) parts.push(r.subagents + " " + plural(r.subagents, "субагент", "субагента", "субагентов"));
@@ -491,12 +641,20 @@
     drawBanks(accounts);
     drawSync(state.snap.chatSync);
     drawAccountTabs(accounts);
+    drawTeam();
 
     const account = accounts.find(a => a.id === state.account);
     const period = (account ? account.periods : state.snap.periods)[state.period];
-    const rows = period.rows;
+    const person = drawPersons(account);
+    let rows = period.rows;
+    let total = period.total;
+    if (account && account.team && person !== "all") {
+      rows = rows.filter(r => r.member === person);
+      const mine = (period.byMember || []).find(m => m.member === person);
+      total = mine ? mine.total : rows.reduce((sum, r) => sum + r.main + r.sub, 0);
+    }
     const active = rows.filter(r => r.active).length;
-    setDrums(period.total);
+    setDrums(total);
 
     const context = $("context");
     context.textContent = PERIODS[state.period].context(period.since);
@@ -512,7 +670,8 @@
     const list = $("chats");
     list.innerHTML = "";
     const max = rows.reduce((m, r) => Math.max(m, r.main + r.sub), 0);
-    rows.forEach(r => list.appendChild(row(r, period.total, max)));
+    const named = !!(account && account.team && person === "all");
+    rows.forEach(r => list.appendChild(row(r, total, max, named)));
     $("legend").hidden = !rows.length;
     $("empty").hidden = rows.length > 0;
     $("empty").textContent = account ? "На этом аккаунте за этот период расхода не было." : PERIODS[state.period].empty;
@@ -552,6 +711,18 @@
     drawStatus();
     try { window.webkit.messageHandlers.refresh.postMessage(null); } catch (e) { state.refreshing = false; drawStatus(); }
   });
+
+  $("team").addEventListener("click", () => { state.panel = !state.panel; draw(); });
+  window.teamEvent = event => {
+    state.flow = event;
+    if (event.state === "waiting") postTeam({ action: "open", url: event.url });
+    if (event.state === "connected") {
+      state.flow = null;
+      state.refreshing = true;
+      try { window.webkit.messageHandlers.refresh.postMessage(null); } catch (e) { state.refreshing = false; }
+    }
+    draw();
+  };
 
   buildDrums();
   draw();
