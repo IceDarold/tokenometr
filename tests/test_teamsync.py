@@ -462,6 +462,7 @@ class TheNumbersTest(Base):
         self.assertEqual(account["team"]["teamName"], "Лаборатория")
         self.assertEqual(snapshot["team"]["state"], "ok")
         self.assertEqual([t["name"] for t in snapshot["team"]["teams"]], ["Лаборатория"])
+        self.assertEqual(snapshot["team"]["user"], {"email": "ada@example.com", "name": "Ada"})
 
     def test_numbers_older_than_a_quarter_of_an_hour_are_marked(self):
         self.readings(("2026-10-07T08:00:00Z", ORG, 10))

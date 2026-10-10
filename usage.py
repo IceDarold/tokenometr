@@ -401,7 +401,7 @@ def apply_team(accounts, team, now_ts):
               "syncedAt": team.get("syncedAt"), "site": team.get("site"),
               "teams": [{"id": s["team"]["id"], "name": s["team"]["name"]}
                         for s in team.get("teams") or [] if isinstance(s.get("team"), dict)],
-              "machine": team.get("machine"), "stale": False}
+              "machine": team.get("machine"), "user": team.get("user"), "stale": False}
     fetched = team.get("fetchedAt")
     status["dataAt"] = fetched
     status["stale"] = bool(fetched) and now_ts - fetched > TEAM_STALE_SECONDS

@@ -469,7 +469,8 @@
     const flow = state.flow;
     const button = $("team");
     const trouble = team && team.state !== "ok";
-    button.textContent = team && team.teams.length ? "Команда: " + team.teams[0].name : "Команда";
+    const name = team && team.teams.length ? team.teams[0].name : "";
+    button.textContent = name ? "Команда: " + (name.length > 18 ? name.slice(0, 17) + "…" : name) : "Команда";
     button.classList.toggle("attention", !!trouble || !!(flow && flow.state === "waiting"));
     button.setAttribute("aria-expanded", state.panel);
     const panel = $("teamPanel");
@@ -514,7 +515,7 @@
       } else if (team.state === "error") {
         panel.append(el("p", "team-note attention", (team.message || "Сайт не ответил") + ". Показаны последние данные, приложение повторит попытку само."));
       } else if (team.syncedAt) {
-        panel.append(el("p", "team-note", "Данные отправлены " + ago(team.syncedAt) + "."));
+        panel.append(el("p", "team-note", "Данные отправлены: " + ago(team.syncedAt)));
       }
       actions.append(teamButton("Открыть на сайте", () => postTeam({ action: "open", url: siteUrl("/app/overview") }), true),
                      teamButton(state.sure ? "Точно отключить?" : "Отключить", () => {
